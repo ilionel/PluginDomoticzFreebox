@@ -201,13 +201,62 @@ class FbxApp(FbxCnx):
             self.create_players()
 
     def __del__(self):
+        # Safety net only: the owner should call close() explicitly
+        self.close()
+
+    def close(self):
+        """
+        Close the current session (logout), never raise.
+        The instance must not be used afterwards.
+        """
         session_token = getattr(self, 'session_token', None)
         if session_token is None:
-            return  # Session was never opened
+            return  # Session was never opened (or already closed)
+        self.session_token = None
         try:
             self._disconnect(session_token)
         except (urllib.error.HTTPError, urllib.error.URLError, timeout, OSError, ValueError) as error:
             Domoticz.Debug(f"Disconnect error: {error}")
+
+    def _is_auth_error(self, error):
+        """
+        Is HTTP error due to an expired or invalid session token
+
+        Args:
+            error (urllib.error.HTTPError): error raised by an API request
+
+        Returns:
+            bool: True if a new session must be opened
+        """
+        if error.code != 403:
+            return False
+        try:
+            body = json.loads(error.read().decode())
+        except (ValueError, OSError, AttributeError):
+            return False
+        return isinstance(body, dict) and body.get('error_code') in ('auth_required', 'invalid_token')
+
+    def _auth_request(self, path, method='GET', data=None):
+        """
+        Authenticated request to API: if the session has expired,
+        open a new session once and retry the request once
+
+        Args:
+            path (str): api_url
+            method (str, optional): GET|POST|PUT. Defaults to 'GET'.
+            data (dict of str: str, optional): POST or PUT datas. Defaults to None.
+
+        Returns:
+            (dict of str: str): Freebox API Response as dictionary
+        """
+        try:
+            return self._request(path, method, {"X-Fbx-App-Auth": self.session_token}, data)
+        except urllib.error.HTTPError as error:
+            if not self._is_auth_error(error):
+                raise
+        Domoticz.Debug('Session expired: opening a new session')
+        self.session_token = self._mksession(self.app_id, self.app_token)
+        return self._request(path, method, {"X-Fbx-App-Auth": self.session_token}, data)
 
     def post(self, path, data=None):
         """
@@ -220,7 +269,7 @@ class FbxApp(FbxCnx):
         Returns:
             (dict of str: str): Freebox API Response as dictionary
         """
-        return self._request(path, 'POST', {"X-Fbx-App-Auth": self.session_token}, data)
+        return self._auth_request(path, 'POST', data)
 
     def put(self, path, data=None):
         """
@@ -233,7 +282,7 @@ class FbxApp(FbxCnx):
         Returns:
             (dict of str: str): Freebox API Response as dictionary
         """
-        return self._request(path, 'PUT', {"X-Fbx-App-Auth": self.session_token}, data)
+        return self._auth_request(path, 'PUT', data)
 
     def get(self, path):
         """
@@ -245,7 +294,7 @@ class FbxApp(FbxCnx):
         Returns:
             (dict of str: str): Freebox API Response as dictionary
         """
-        return self._request(path, 'GET', {"X-Fbx-App-Auth": self.session_token})
+        return self._auth_request(path, 'GET')
 
     def call(self, path):
         """
@@ -315,36 +364,38 @@ class FbxApp(FbxCnx):
                 result.update({str(label): str(self.percent(used, total))})
         return result
 
-    def get_name_from_macaddress(self, p_macaddress):
+    def get_name_from_macaddress(self, p_macaddress, devices=None):
         """
         Find device name by his mac-address
 
         Args:
             p_macaddress (str): @mac type 01:02:03:04:05:06
+            devices (list, optional): result of ls_devices() (fetched if None). Defaults to None.
 
         Returns:
             str: device name if @mac is know or None
         """
         result = None
-        ls_devices = self.ls_devices()
+        ls_devices = self.ls_devices() if devices is None else devices
         for device in ls_devices:
             macaddress = device['id']
             if ("ETHER-" + p_macaddress.upper()) == macaddress.upper():
                 result = device['primary_name']
         return result
 
-    def reachable_macaddress(self, p_macaddress):
+    def reachable_macaddress(self, p_macaddress, devices=None):
         """
         Check if device is reachable by his mac-address
 
         Args:
             p_macaddress (str): @mac type 01:02:03:04:05:06
+            devices (list, optional): result of ls_devices() (fetched if None). Defaults to None.
 
         Returns:
             bool: True if reachable else False
         """
         result = False
-        ls_devices = self.ls_devices()
+        ls_devices = self.ls_devices() if devices is None else devices
         for device in ls_devices:
             macaddress = device['id']
             if ("ETHER-" + p_macaddress.upper()) == macaddress.upper():
@@ -435,15 +486,16 @@ class FbxApp(FbxCnx):
                     device2['label'] = device2.get('label', '') + '2'
                     result.update({device2['label']: device2})
 
-            nodes = self.call("home/nodes")
-            for node in nodes:
+        if nodes:  # Sensors are only read when tileset is available (one call)
+            home_nodes = self.call("home/nodes")
+            for home_node in home_nodes:
                 device = {}
                 label = ''
-                if node.get("category") in ("pir", "dws"):
-                    label = node.get("label", '')
+                if home_node.get("category") in ("pir", "dws"):
+                    label = home_node.get("label", '')
                     device.update({"label": str(label)})
-                    device.update({"type": str(node["category"])})
-                    for endpoint in node.get("show_endpoints", []):
+                    device.update({"type": str(home_node["category"])})
+                    for endpoint in home_node.get("show_endpoints", []):
                         if endpoint.get("name") == 'battery':
                             battery = endpoint.get("value")
                             device.update({"battery": str(battery)})
@@ -455,30 +507,38 @@ class FbxApp(FbxCnx):
                         result.update({label: device})
         return result
 
-    def connection_rate(self):
+    def connection_rate(self, connection=None):
         """
         Get upload and download speed rate (of WAN Interface)
+
+        Args:
+            connection (dict, optional): result of call('connection/') (fetched if None). Defaults to None.
 
         Returns:
             (dict of str: str): {rate_down: rate, rate_up: rate} (ko/s)
         """
         result = {}
-        connection = self.call('connection/')
+        if connection is None:
+            connection = self.call('connection/')
         if connection.get('rate_down') is not None:
             result.update({str('rate_down'): str(connection['rate_down']/1024)})
         if connection.get('rate_up') is not None:
             result.update({str('rate_up'): str(connection['rate_up']/1024)})
         return result
 
-    def wan_state(self):
+    def wan_state(self, connection=None):
         """
         Is WAN link UP or DOWN
+
+        Args:
+            connection (dict, optional): result of call('connection/') (fetched if None). Defaults to None.
 
         Returns:
             bool: True if "UP" else False (None if state is unavailable)
         """
         state = None
-        connection = self.call('connection/')
+        if connection is None:
+            connection = self.call('connection/')
         if connection.get('state') is None:
             Domoticz.Debug('Connection state is unavailable')
         elif connection['state'] == 'up':
@@ -626,6 +686,7 @@ class FbxApp(FbxCnx):
 
         def sensors(self):
             result = {}
+            self.info = self.getinfo()  # Fetch fresh values (instance is long-lived)
             if self.info and self.info.get("sensors"):
                 result = self.info["sensors"]
             return result
