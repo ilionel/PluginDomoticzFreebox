@@ -189,6 +189,7 @@ class FbxApp(FbxCnx):
         FbxCnx (FbxCnx): Freebox connection
     """
     tv_player = None
+    unreachable = False  # Set on network error: skip next calls until reset by the caller
 
     def __init__(self, app_id, app_token, host=HOST, session_token=None):
         FbxCnx.__init__(self, host)
@@ -307,13 +308,20 @@ class FbxApp(FbxCnx):
             (dict of str: str): Freebox API Response as dictionary
         """
         result = {}
+        if self.unreachable:
+            Domoticz.Debug(f"Freebox unreachable: skip call ('{path}')")
+            return result
         try:
             api_result = self.get(path)
             if api_result['success'] and 'result' in api_result:
                 result = api_result['result']
-        except (urllib.error.HTTPError, urllib.error.URLError) as error:
+        except urllib.error.HTTPError as error:
+            Domoticz.Error(f"API Error ('{path}'): {error}")
+        except urllib.error.URLError as error:
+            self.unreachable = True  # Network error: avoid waiting a timeout for each call
             Domoticz.Error(f"API Error ('{path}'): {error}")
         except timeout:
+            self.unreachable = True
             Domoticz.Error(f"Timeout when call ('{path}')")
         return result
 

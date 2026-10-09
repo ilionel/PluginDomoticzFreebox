@@ -669,6 +669,7 @@ class FreeboxPlugin:
         """
         if self._fbx is None:
             self._fbx = freebox.FbxApp("idPluginDomoticz", self.token, host=self.freebox_url)
+        self._fbx.unreachable = False  # New cycle: try to reach the Freebox again
         return self._fbx
 
     def _close_fbx(self):
