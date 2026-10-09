@@ -42,7 +42,7 @@ Pour mettre à jour le plugin :
 
 | Field | Information|
 | ----- | ---------- |
-| URL | L'adresse d'accès à la Freebox (typiquement "https://mafreebox.freebox.fr") |
+| URL | L'adresse d'accès à la Freebox (typiquement "https://mafreebox.freebox.fr"). En https, utilisez ce nom et non l'adresse IP de la box (ex. 192.168.1.254) : le certificat de la Freebox est émis pour "mafreebox.freebox.fr" et la vérification TLS échouerait. |
 | Port | Le port pour accéder à l'interface Web de la Freebox (généralement "443" pour de https en réseau local) |
 | Token | Le « Token » de connexion à la Freebox qui vous sera communiqué lors de la première connexion du plugin (et visible dans les logs de Domoticz) |
 | Liste @mac pour la présence (séparé par ;) | La liste d'adresse mac dont vous souhaitez monitorer la disponibilité (quand elles sont connectées à la Freebox) |

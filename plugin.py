@@ -772,7 +772,7 @@ class FreeboxPlugin:
                 if name == "REBOOT": self._switch_reboot(f)
                 elif name == "WIFI": self._switch_wifi(f, command)
             elif device == self.Device.PLAYER.value:
-                self._switch_player(f, command, str(name)[-1:])
+                self._switch_player(f, command, str(name).rsplit('_', 1)[-1])  # name: '<model>_<uid>'
 
         except Exception as e:
             Domoticz.Error(f"onCommand error: {e}")
