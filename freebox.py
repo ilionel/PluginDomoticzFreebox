@@ -163,7 +163,7 @@ class FbxCnx:
         }
         session_token = self._request(
             'login/session/', 'POST', None, data)['result']['session_token']
-        Domoticz.Debug('Session Token: ' + session_token)
+        Domoticz.Debug('Session Token obtained')
         return session_token
 
     def _disconnect(self, session_token):
@@ -177,7 +177,7 @@ class FbxCnx:
             'login/logout/',
             'POST',
             {'Content-Type': 'application/json', 'X-Fbx-App-Auth': session_token})
-        Domoticz.Debug('Disconnect' + result)
+        Domoticz.Debug(f"Disconnect: {result}")
         return result
 
 
@@ -201,7 +201,13 @@ class FbxApp(FbxCnx):
             self.create_players()
 
     def __del__(self):
-        self._disconnect(self.session_token)
+        session_token = getattr(self, 'session_token', None)
+        if session_token is None:
+            return  # Session was never opened
+        try:
+            self._disconnect(session_token)
+        except (urllib.error.HTTPError, urllib.error.URLError, timeout, OSError, ValueError) as error:
+            Domoticz.Debug(f"Disconnect error: {error}")
 
     def post(self, path, data=None):
         """
@@ -380,16 +386,16 @@ class FbxApp(FbxCnx):
         for node in nodes:
             device = {}
             label = ''
-            if node["type"] == "alarm_control":
+            if node.get("type") == "alarm_control":
                 device.update({"type": str(node["type"])})
-                for data in node["data"]:
-                    if (data["ep_id"] == 11) and node["type"] == "alarm_control":
-                        label = data["label"]
-                        if data['value'] == 'alarm1_armed':
+                for data in node.get("data", []):
+                    if data.get("ep_id") == 11:
+                        label = data.get("label", '')
+                        if data.get('value') == 'alarm1_armed':
                             value = 1
                             device.update(
                                 {"alarm1_status": str(value)})
-                        elif data['value'] == 'alarm1_arming':
+                        elif data.get('value') == 'alarm1_arming':
                             value = -1
                             device.update(
                                 {"alarm1_status": str(value)})
@@ -397,11 +403,11 @@ class FbxApp(FbxCnx):
                             value = 0
                             device.update(
                                 {"alarm1_status": str(value)})
-                        if data['value'] == 'alarm2_armed':
+                        if data.get('value') == 'alarm2_armed':
                             value = 1
                             device.update(
                                 {"alarm2_status": str(value)})
-                        elif data['value'] == 'alarm2_arming':
+                        elif data.get('value') == 'alarm2_arming':
                             value = -1
                             device.update(
                                 {"alarm2_status": str(value)})
@@ -410,40 +416,41 @@ class FbxApp(FbxCnx):
                             device.update(
                                 {"alarm2_status": str(value)})
                         device.update({"label": str(label)})
-                    elif (data["ep_id"] == 13) and node["type"] == "alarm_control":  # error
-                        status_error = data["value"]
+                    elif data.get("ep_id") == 13:  # error
+                        status_error = data.get("value")
                         device.update(
                             {"status_error": str(status_error)})
-                    elif data["name"] == 'battery_warning':
-                        battery = data["value"]
+                    elif data.get("name") == 'battery_warning':
+                        battery = data.get("value")
                         device.update({"battery": str(battery)})
+                # Build alarm devices once all endpoints (and thus the label) are known
+                if 'alarm1_status' in device:
                     device1 = device.copy()
-                    device2 = device.copy()
-                    if 'alarm1_status' in device1:
-                        device1['value'] = device1['alarm1_status']
-                        device1['label'] = device1['label']+'1'
-                    if 'alarm2_status' in device2:
-                        device2['value'] = device2['alarm2_status']
-                        device2['label'] = device2['label']+'2'
+                    device1['value'] = device1['alarm1_status']
+                    device1['label'] = device1.get('label', '') + '1'
                     result.update({device1['label']: device1})
+                if 'alarm2_status' in device:
+                    device2 = device.copy()
+                    device2['value'] = device2['alarm2_status']
+                    device2['label'] = device2.get('label', '') + '2'
                     result.update({device2['label']: device2})
 
             nodes = self.call("home/nodes")
             for node in nodes:
                 device = {}
                 label = ''
-                if ((node["category"] == "pir") or (node["category"] == "dws")):
-                    label = node["label"]
+                if node.get("category") in ("pir", "dws"):
+                    label = node.get("label", '')
                     device.update({"label": str(label)})
                     device.update({"type": str(node["category"])})
-                    for endpoint in node["show_endpoints"]:
-                        if endpoint["name"] == 'battery':
-                            battery = endpoint["value"]
+                    for endpoint in node.get("show_endpoints", []):
+                        if endpoint.get("name") == 'battery':
+                            battery = endpoint.get("value")
                             device.update({"battery": str(battery)})
-                        elif endpoint["name"] == 'trigger':
-                            if endpoint["value"]:
+                        elif endpoint.get("name") == 'trigger':
+                            if endpoint.get("value"):
                                 device.update({"value": 0})
-                            elif not endpoint["value"]:
+                            else:
                                 device.update({"value": 1})
                         result.update({label: device})
         return result
@@ -457,9 +464,9 @@ class FbxApp(FbxCnx):
         """
         result = {}
         connection = self.call('connection/')
-        if connection['rate_down']:
+        if connection.get('rate_down') is not None:
             result.update({str('rate_down'): str(connection['rate_down']/1024)})
-        if connection['rate_up']:
+        if connection.get('rate_up') is not None:
             result.update({str('rate_up'): str(connection['rate_up']/1024)})
         return result
 
@@ -468,11 +475,13 @@ class FbxApp(FbxCnx):
         Is WAN link UP or DOWN
 
         Returns:
-            bool: True if "UP" else False
+            bool: True if "UP" else False (None if state is unavailable)
         """
         state = None
         connection = self.call('connection/')
-        if connection['state'] == 'up':
+        if connection.get('state') is None:
+            Domoticz.Debug('Connection state is unavailable')
+        elif connection['state'] == 'up':
             Domoticz.Debug('Connection is UP')
             state = True
         else:
@@ -485,11 +494,13 @@ class FbxApp(FbxCnx):
         Is WLAN state UP or DOWN
 
         Returns:
-            bool: True if "UP" else False
+            bool: True if "UP" else False (None if state is unavailable)
         """
         enabled = None
         wifi = self.call('wifi/config/')
-        if wifi['enabled']:
+        if wifi.get('enabled') is None:
+            Domoticz.Debug('Wifi state is unavailable')
+        elif wifi['enabled']:
             Domoticz.Debug('Wifi interface is UP')
             enabled = True
         else:
@@ -525,12 +536,17 @@ class FbxApp(FbxCnx):
                 else:
                     Domoticz.Debug('Wifi is now OFF')
         except (urllib.error.HTTPError, urllib.error.URLError) as error:
-            Domoticz.Error(f"API Error ('wifi/config/'): {error}")
+            if not switch_on and isinstance(getattr(error, 'reason', None), (timeout, TimeoutError)):
+                # Connect timeout is wrapped in URLError: same as the timeout case below
+                Domoticz.Log('Wifi disabled')
+                status = False
+            else:
+                Domoticz.Error(f"API Error ('wifi/config/'): {error}")
         except timeout as exc:
             if not switch_on:
                 # If we are connected using wifi, disabling wifi will close connection
                 # thus PUT response will never be received: a timeout is expected
-                Domoticz.Error('Wifi disabled')
+                Domoticz.Log('Wifi disabled')
                 status = False
             else:
                 # Forward timeout exception as should not occur
@@ -541,7 +557,7 @@ class FbxApp(FbxCnx):
         """
         Reboot the Freebox server
         """
-        Domoticz.Debug('Try to reboot with session : ' + self.session_token)
+        Domoticz.Debug('Try to reboot')
         response = self.post("system/reboot")
         if response['success']:
             Domoticz.Debug('Reboot initiated')
@@ -610,7 +626,7 @@ class FbxApp(FbxCnx):
 
         def sensors(self):
             result = {}
-            if self.info and self.info["sensors"]:
+            if self.info and self.info.get("sensors"):
                 result = self.info["sensors"]
             return result
 
@@ -650,7 +666,7 @@ class FbxApp(FbxCnx):
                     f"/player/{uid}/api/v{TV_API_VER}/status")
             except (urllib.error.HTTPError, urllib.error.URLError) as error:
                 # If player is shutdown : Error="Gateway Time-out"
-                if error.code == 504:  # error != 'Gateway Time-out'
+                if getattr(error, 'code', None) == 504:  # error != 'Gateway Time-out'
                     status = False
                 else:
                     Domoticz.Error(
@@ -658,14 +674,16 @@ class FbxApp(FbxCnx):
             except timeout:
                 Domoticz.Error('Timeout')
             else:
-                if response['success'] and response['result']['power_state']:
-                    status = True if response['result']['power_state'] == 'running' else False
+                power_state = (response.get('result') or {}).get('power_state')
+                if response.get('success') and power_state:
+                    status = True if power_state == 'running' else False
             Domoticz.Debug(f"Is watching TV{uid}? : {status}")
             return status
 
         def remote(self, uid, remote_code, key, long=False):
             url = f"http://hd{uid}.freebox.fr/pub/remote_control?code={remote_code}&key={key}"
             url = url + '&long=true' if long else url
+            response = None
             try:
                 request = Request(url)
                 response = urlopen(request, timeout=API_TMOUT).read()
