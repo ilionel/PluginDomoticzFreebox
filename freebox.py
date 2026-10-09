@@ -41,6 +41,10 @@ class FbxCnx:
         self.api_ver = int(float(api))
         self.info = None
         self.secure = ssl.create_default_context()
+        # Python 3.13+ enables VERIFY_X509_STRICT by default, which rejects the
+        # certificates served by the Freebox (no Authority Key Identifier).
+        # Keep chain/hostname verification but disable this strict check.
+        self.secure.verify_flags &= ~getattr(ssl, 'VERIFY_X509_STRICT', 0)
         cert_path = os.path.join(os.path.dirname(__file__), CA_FILE)
         request = Request(host + '/api_version')
         try:
